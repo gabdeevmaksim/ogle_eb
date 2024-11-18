@@ -1,2 +1,3 @@
 .venv/
 /demo_data/smc_phot/
+.DS_Store
