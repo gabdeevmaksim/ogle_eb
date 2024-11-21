@@ -3,6 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from src.eclipsing_binary.config import get_paths
+from scipy.optimize import curve_fit
+from sklearn.cluster import KMeans
+from sklearn.ensemble import IsolationForest
+from sklearn.cluster import DBSCAN
 
 
 class EclipsingBinary:
@@ -118,7 +122,7 @@ class EclipsingBinary:
         except FileNotFoundError:
             print(f"Warning: Light curve file not found for {self.object_name}")
 
-    def plot_light_curves(self, save_plot=False):
+    def plot_light_curves(self, save_plot=False, plot_fit=False, n_harmonics=4):
         """
         Plots the phase-folded light curves in filters I and V.
 
@@ -165,6 +169,15 @@ class EclipsingBinary:
         # Add legend in the upper right corner
         plt.legend(loc='upper right')
 
+        if plot_fit and self.lc_I is not None and f'mag_fit_{n_harmonics}' in self.lc_I:
+            ax.plot(self.lc_I[f'phase_fit_{n_harmonics}'], self.lc_I[f'mag_fit_{n_harmonics}'], '-', 
+                    color='darkred', label=f'I-band Fit ({n_harmonics} harmonics)')
+
+        if plot_fit and self.lc_V is not None and f'mag_fit_{n_harmonics}' in self.lc_V:
+            ax.plot(self.lc_V[f'phase_fit_{n_harmonics}'], self.lc_V[f'mag_fit_{n_harmonics}'], '-', 
+                    color='darkgreen', label=f'V-band Fit ({n_harmonics} harmonics)')
+
+
         # Save the plot if requested
         if save_plot:
             paths = get_paths()
@@ -172,3 +185,169 @@ class EclipsingBinary:
             plt.savefig(filename)
 
         plt.show()
+
+    def fit_light_curve(self, band='I', n_harmonics=4):
+        """
+        Fits a Fourier series model to the specified light curve.
+
+        Args:
+            band (str, optional): The band to fit ('I' or 'V'). Defaults to 'I'.
+            n_harmonics (int, optional): The number of harmonics to include in the 
+                                        Fourier series. Defaults to 4.
+        """
+
+        if band == 'I' and self.lc_I is not None:
+            lc_data = self.lc_I
+        elif band == 'V' and self.lc_V is not None:
+            lc_data = self.lc_V
+        else:
+            print(f"Warning: No light curve data found for band {band} in {self.object_name}")
+            return
+
+        # Define the model function (Fourier series)
+        def fourier_model(phase, *params):
+            """
+            Fourier series model for the light curve.
+
+            Args:
+                phase (array-like): Phase values.
+                *params: Parameters of the Fourier series (amplitude, frequency, phase).
+
+            Returns:
+                array-like: Model predictions.
+            """
+            result = params[0]  # Constant term
+            for i in range(1, len(params) // 3):
+                result += params[3*i - 2] * np.sin(2 * np.pi * i * phase + params[3*i - 1])
+            return result
+
+        # Initial guess for parameters (adjust as needed)
+        initial_guess = [np.mean(lc_data['mag'])]  # Constant term
+        for i in range(1, n_harmonics + 1):
+            initial_guess.extend([0.1, 0, 0])  # Amplitude, frequency, phase
+
+        # Perform the curve fit
+        popt, pcov = curve_fit(fourier_model, lc_data['phase'], lc_data['mag'], p0=initial_guess)
+
+        # Generate a smooth light curve with 100 points per period
+        phase_fit = np.linspace(0, 1, 100)
+        mag_fit = fourier_model(phase_fit, *popt)
+
+        # Store the fit results in new keys within lc_data
+        lc_data['phase_fit_' + str(n_harmonics)] = phase_fit  # Use a unique key
+        lc_data['mag_fit_' + str(n_harmonics)] = mag_fit  # Use a unique key
+
+    def clean_fits(self, n_harmonics_to_delete=None):
+        """
+        Removes fitted light curve data from the object.
+
+        Args:
+            n_harmonics_to_delete (list, optional): A list of n_harmonics values 
+                                                    for which to delete the fitted data. 
+                                                    Defaults to None, which deletes all fits.
+        """
+
+        if n_harmonics_to_delete is None:
+            # Delete all fits
+            keys_to_delete = [key for key in self.lc_I if key.startswith('phase_fit_') or key.startswith('mag_fit_')]
+            if self.lc_V is not None:
+                keys_to_delete += [key for key in self.lc_V if key.startswith('phase_fit_') or key.startswith('mag_fit_')]
+        else:
+            # Delete fits with specified n_harmonics
+            keys_to_delete = []
+            for n in n_harmonics_to_delete:
+                keys_to_delete.extend([f'phase_fit_{n}', f'mag_fit_{n}'])
+
+        # Remove the keys from lc_I and lc_V
+        for key in keys_to_delete:
+            if key in self.lc_I:
+                del self.lc_I[key]
+            if self.lc_V is not None and key in self.lc_V:
+                del self.lc_V[key]
+
+    def detect_outliers(self, band='I', method='all', save_plot=True):
+        """
+        Detects outliers in the specified light curve using the given method.
+
+        Args:
+            band (str, optional): The band to analyze ('I' or 'V'). Defaults to 'I'.
+            method (str or list, optional): The outlier detection method(s) to use. 
+                                           Can be 'all', 'kmeans', 'dbscan', 'isolation_forest', 
+                                           or a list containing any combination of these. 
+                                           Defaults to 'all'.
+            save_plot (bool, optional): Whether to save the plots of clustering results.
+                                        Defaults to True.
+        """
+
+        if band == 'I' and self.lc_I is not None:
+            lc_data = self.lc_I
+        elif band == 'V' and self.lc_V is not None:
+            lc_data = self.lc_V
+        else:
+            print(f"Warning: No light curve data found for band {band} in {self.object_name}")
+            return
+
+        if method == 'all':
+            methods = ['kmeans', 'dbscan', 'isolation_forest']
+        elif isinstance(method, str):
+            methods = [method]
+        else:
+            methods = method  # Assume method is a list
+
+        for method in methods:
+            if method == 'kmeans':
+                # Apply KMeans clustering
+                kmeans = KMeans(n_clusters=10, random_state=0)  # Adjust n_clusters as needed
+                lc_data['kmeans_labels'] = kmeans.fit_predict(lc_data['mag'].reshape(-1, 1))
+
+                # Plot clustering results
+                if save_plot:
+                    plt.figure()
+                    sns.scatterplot(x=lc_data['phase'], y=lc_data['mag'], hue=lc_data['kmeans_labels'], palette='viridis')
+                    plt.title(f"{self.object_name} - {band} band - KMeans Clustering")
+                    plt.xlabel("Phase")
+                    plt.ylabel("Magnitude")
+                    plt.gca().invert_yaxis()
+                    paths = get_paths()
+                    filename = os.path.join(paths['demo_data_dir'], f"{self.object_name}_{band}_kmeans.png")
+                    plt.savefig(filename)
+                    plt.close()
+
+            elif method == 'dbscan':
+                # Apply DBSCAN clustering
+                eps = np.mean(lc_data['err'])
+
+                dbscan = DBSCAN(eps=eps, min_samples=15)  # Adjust eps and min_samples as needed
+                lc_data['dbscan_labels'] = dbscan.fit_predict(lc_data['mag'].reshape(-1, 1))
+
+                # Plot clustering results
+                if save_plot:
+                    plt.figure()
+                    sns.scatterplot(x=lc_data['phase'], y=lc_data['mag'], hue=lc_data['dbscan_labels'], palette='viridis')
+                    plt.title(f"{self.object_name} - {band} band - DBSCAN Clustering")
+                    plt.xlabel("Phase")
+                    plt.ylabel("Magnitude")
+                    plt.gca().invert_yaxis()
+                    paths = get_paths()
+                    filename = os.path.join(paths['demo_data_dir'], f"{self.object_name}_{band}_dbscan.png")
+                    plt.savefig(filename)
+                    plt.close()
+
+            elif method == 'isolation_forest':
+                # Apply Isolation Forest
+                isolation_forest = IsolationForest(n_estimators=300)
+                isolation_forest.fit(lc_data['mag'].reshape(-1, 1))
+                lc_data['isolation_forest_scores'] = isolation_forest.decision_function(lc_data['mag'].reshape(-1, 1))
+
+                # Plot anomaly scores
+                if save_plot:
+                    plt.figure()
+                    sns.scatterplot(x=lc_data['phase'], y=lc_data['mag'], hue=lc_data['isolation_forest_scores'], palette='viridis')
+                    plt.title(f"{self.object_name} - {band} band - Isolation Forest Anomaly Scores")
+                    plt.xlabel("Phase")
+                    plt.ylabel("Magnitude")
+                    plt.gca().invert_yaxis()
+                    paths = get_paths()
+                    filename = os.path.join(paths['demo_data_dir'], f"{self.object_name}_{band}_isolation_forest.png")
+                    plt.savefig(filename)
+                    plt.close()
