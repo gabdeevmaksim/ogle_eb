@@ -1,217 +1,219 @@
-import numpy as np
+import os
+import pandas as pd
+import astropy.units as u
+from astroquery.gaia import Gaia
+from astropy.table import Table
+from astropy.coordinates import SkyCoord
+from src.eclipsing_binary.config import get_paths
 from src.eclipsing_binary.core import EclipsingBinary
 
-def read_data(filename, ident_filename=None):
+def read_data(paths):
     """
-    Reads a file with fixed-width columns containing eclipsing binary data,
-    optionally combines it with identification data, and returns a list of 
-    EclipsingBinary objects.
+    Reads and combines data from eclipsing binary, identification, and 
+    (optionally) extinction files using Pandas. 
+    Creates EclipsingBinary objects from the combined data.
 
     Args:
-      filename (str): The path to the main data file.
-      ident_filename (str, optional): The path to the identification data file.
+        paths (dict): A dictionary containing the paths to the data files:
+                        'ecl_file', 'ident_file', and optionally 'ext_file'.
 
     Returns:
-      list: A list of EclipsingBinary objects.
+        list: A list of EclipsingBinary objects.
     """
 
-    column_names = ['object_name', 'I_magnitude', 'V_magnitude', 'period_days', 
-                    'epoch_of_minimum', 'main_eclipse_dip', 'second_eclipse_dip']
-    
-    # Define the widths of each column
-    col_widths = [19, 7, 7, 13, 12, 6, 6]  
+    # Read eclipsing binary data (_ecl) using fixed-width formatted reader
+    ecl_col_specs = [(0, 19), (20, 26), (27, 34), (35, 46), (46, 58), (58, 64), (64, 70)]
+    ecl_names = ['object_name', 'I_magnitude', 'V_magnitude', 'period_days', 
+                 'epoch_of_minimum', 'main_eclipse_dip', 'second_eclipse_dip']
+    ecl_df = pd.read_fwf(paths['ecl_file'], colspecs=ecl_col_specs, names=ecl_names, header=None)
 
+    # Read identification data (_ident)
+    ident_col_specs = [(0, 19), (20, 24), (25, 36), (37, 49), (50, 66), (67, 82), (83, 99), (100, 116)]
+    ident_names = ['object_name', 'type', 'RA_coord', 'DEC_coord', 'OGLE-IV', 'OGLE-III', 'OGLE-II', 'other_names']
+    ident_df = pd.read_fwf(paths['ident_file'], colspecs=ident_col_specs, names=ident_names, header=None)
+
+    # Read extinction data (_ext) if provided
+    if 'ext_file' in paths:
+        ext_col_specs = [(2, 14), (15, 30), (31, 41), (42, 55), (56, 63), (65, 72), (73, 82), (83, 92), (93,102), (103,112), (113,121), (122,130), (131,138), (138,149), (150,161)]
+        ext_names = ['RA_deg', 'Dec_deg',  'RA_h', 'Dec_h', 'E(V-I)', '-sigma1', '+sigma2', '(V-I)_RC', '(V-I)_0', 'E(V-I)peak', 'E(V-I)sfd', 'box', 'sep', 'RA_coord', 'DEC_coord']
+        ext_df = pd.read_fwf(paths['ext_file'], colspecs=ext_col_specs, names=ext_names, header=3)
+        ext_df.drop(ext_df.tail(1).index, inplace=True)
+    else:
+        ext_df = None
+
+     # Merge dataframes
+    merged_df = pd.merge(ecl_df, ident_df, on='object_name', how='left')
+    if ext_df is not None:
+        merged_df = pd.merge(merged_df, ext_df, on=['RA_coord', 'DEC_coord'], how='left')
+
+    # Remove duplicates by object_name
+    merged_df.drop_duplicates(subset='object_name', inplace=True)
+
+    # Create EclipsingBinary objects
     eclipsing_binaries = []
+    for index, row in merged_df.iterrows():
+        # Convert the row to a dictionary
+        row_dict = row.to_dict()
 
-    with open(filename, 'r') as file:
-        for line in file:
-            # Split the line into fields based on column widths
-            values = [line[sum(col_widths[:i]):sum(col_widths[:i+1])].strip() 
-                      for i in range(len(col_widths))]
+        # Remove unnecessary columns
+     
+        for col in ['OGLE-IV', 'OGLE-III', 'OGLE-II', 'other_names', 
+                    'RA_deg', 'Dec_deg', 'RA_h', 'Dec_h', '(V-I)_RC', '(V-I)_0', 'E(V-I)_peak', 'box', 'sep']:
+            row_dict.pop(col, None)
 
-            # Convert numeric values to floats, handling '-'
-            for i in range(1, len(values)):  # Start from index 1 to skip 'object_name'
-                try:
-                    values[i] = float(values[i])
-                except ValueError:
-                    if values[i] == '-':
-                        values[i] = np.nan  # Replace '-' with np.nan
-                    else:
-                        raise  # Raise the error for other conversion issues
+        # Rename columns to match EclipsingBinary attributes
+        row_dict['obj_type'] = row_dict.pop('type', None)
+        row_dict['RA'] = row_dict.pop('RA_coord', None)
+        row_dict['DEC'] = row_dict.pop('DEC_coord', None)
 
-            # Create an EclipsingBinary object and add it to the list
-            eclipsing_binaries.append(EclipsingBinary(*values))  # Pass values directly
-    
-        if ident_filename:
-          ident_data = {}
-          with open(ident_filename, 'r') as ident_file:
-              for line in ident_file:
-                  parts = line.split()
-                  ident_data[parts[0]] = {
-                      'obj_type': parts[1],
-                      'RA': parts[2],
-                      'DEC': parts[3]
-                  }
+        # Create extinction dictionary if ext_df is not None
+        if ext_df is not None:
+            row_dict['extinction'] = {
+                'E(V-I)': row_dict.pop('E(V-I)'),
+                '-sigma1': row_dict.pop('-sigma1'),
+                '+sigma2': row_dict.pop('+sigma2'),
+                'E(V-I)sfd': row_dict.pop('E(V-I)sfd')
+            }
 
-          # Add identification data to EclipsingBinary objects
-          for binary in eclipsing_binaries:
-              if binary.object_name in ident_data:
-                  binary.obj_type = ident_data[binary.object_name]['obj_type']
-                  binary.RA = ident_data[binary.object_name]['RA']
-                  binary.DEC = ident_data[binary.object_name]['DEC']
+        # Create EclipsingBinary object with keyword arguments
+        binary = EclipsingBinary(**row_dict)
+        eclipsing_binaries.append(binary)
 
     return eclipsing_binaries
 
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.cluster import DBSCAN
-from src.eclipsing_binary.config import get_paths
-import os
-
-def test_dbscan(eb_object, eps_coef_range, min_samples_range, band='I', save_plot=True):
+def print_coordinates(binaries, output_filename):
     """
-    Tests DBSCAN with different parameters on an EclipsingBinary object.
+    Prints the coordinates of stars from a list of EclipsingBinary objects to a file.
 
     Args:
-        eb_object (EclipsingBinary): The EclipsingBinary object to analyze.
-        eps_coef_range (list): A list of three values [start, end, step] for the 
-                                 coefficient to multiply with the mean error to get eps.
-        min_samples_range (list): A list of three values [start, end, step] for the 
-                                    min_samples parameter of DBSCAN.
-        band (str, optional): The band to analyze ('I' or 'V'). Defaults to 'I'.
-        save_plot (bool, optional): Whether to save the plots. Defaults to True.
+        binaries (list): A list of EclipsingBinary objects.
+        output_filename (str): The name of the output file.
     """
 
-    if band == 'I' and eb_object.lc_I is not None:
-        lc_data = eb_object.lc_I
-    elif band == 'V' and eb_object.lc_V is not None:
-        lc_data = eb_object.lc_V
-    else:
-        print(f"Warning: No light curve data found for band {band} in {eb_object.object_name}")
-        return
+    with open(output_filename, 'w') as f:
+        for binary in binaries:
+            if binary.RA is not None and binary.DEC is not None:
+                # Format RA and DEC to HH:MM:SS.SS format
+                ra_hms = binary.RA
+                dec_dms = binary.DEC
 
-    # Calculate base eps (mean of errors)
-    base_eps = np.mean(lc_data['err'])
+                f.write(f"{ra_hms} {dec_dms}\n")
 
-    # Iterate through eps and min_samples values
-    for eps_coef in np.arange(*eps_coef_range):
-        for min_samples in np.arange(*min_samples_range):
-            # Calculate eps
-            eps = base_eps * eps_coef
-
-            # Apply DBSCAN
-            dbscan = DBSCAN(eps=eps, min_samples=min_samples)
-            labels = dbscan.fit_predict(lc_data['mag'].reshape(-1, 1))
-
-            # Plot the results
-            if save_plot:
-                plt.figure()
-                sns.scatterplot(x=lc_data['phase'], y=lc_data['mag'], hue=labels, palette='viridis')
-                plt.title(f"{eb_object.object_name} - {band} band - DBSCAN (eps_coef={eps_coef:.2f}, min_samples={min_samples})")
-                plt.xlabel("Phase")
-                plt.ylabel("Magnitude")
-                plt.gca().invert_yaxis()
-                paths = get_paths()  # Assuming get_paths is accessible here
-                filename = os.path.join(paths['demo_data_dir'], f"{eb_object.object_name}_{band}_dbscan_{eps_coef:.2f}_{min_samples}.png")
-                plt.savefig(filename)
-                plt.close()
-
-def sigma_clip_window(eb_object, window_range, sigma_range, band='I', save_plot=True):
+def gaia_cross_match(binaries, 
+                    table_name="my_table", 
+                    gaia_table="gaiadr3.gaia_source", 
+                    radius=1,
+                    save_to_file=False):
     """
-    Applies sigma-clipping with a window function to an EclipsingBinary object.
+    Logs into the Gaia archive, uploads a table of sources created from a list of objects,
+    updates column flags, performs a crossmatch with a specified Gaia table, and retrieves 
+    the results with a custom query.
+
+    GAIA_USERNAME and GAIA_PASSWORD should be writen in your /.bashrc or /.zshrc file.
 
     Args:
-        eb_object (EclipsingBinary): The EclipsingBinary object to analyze.
-        window_range (list): A list of three values [start, end, step] for the 
-                               window size in phase units.
-        sigma_range (list): A list of three values [start, end, step] for the 
-                             number of sigmas to use as a threshold.
-        band (str, optional): The band to analyze ('I' or 'V'). Defaults to 'I'.
-        save_plot (bool, optional): Whether to save the plots. Defaults to True.
+        binaries (list): List of EclipsingBinary objects.
+        table_name (str, optional): Name for the uploaded table. 
+                                    Defaults to "my_table".
+        gaia_table (str, optional): Name of the Gaia table to 
+                                    crossmatch with. Defaults to 
+                                    "gaiadr3.gaia_source".
+        radius (int, optional): Crossmatch radius in arcseconds. 
+                                Defaults to 1.
+        save_to_file (bool, optional): Save the resulting table in .ecsv format
+
+    Returns:
+        astropy.table.Table: Crossmatch results.
     """
+    
+    username = os.environ.get('GAIA_USERNAME')
+    password = os.environ.get('GAIA_PASSWORD')
+    full_table_name = f"user_{username}.{table_name}"
+    xmatch_table_name = "xmatch"
 
-    if band == 'I' and eb_object.lc_I is not None:
-        lc_data = eb_object.lc_I
-    elif band == 'V' and eb_object.lc_V is not None:
-        lc_data = eb_object.lc_V
-    else:
-        print(f"Warning: No light curve data found for band {band} in {eb_object.object_name}")
-        return
+    try:
+        Gaia.login(user=username, password=password)
 
-    phase = lc_data['phase']
-    mag = lc_data['mag']
-    err = lc_data['err']
+        # Check if table already exists (and delete if it does)
+        tables = Gaia.load_tables(only_names=True)
+        for table in tables:
+            if f"user_mgabdeev.{full_table_name}" == table.get_qualified_name():
+                print(f"Table '{full_table_name}' already exists. Deleting...")
+                Gaia.delete_user_table(table_name=table_name)
+                break
 
-    for window_size in np.arange(*window_range):
-        for sigma in np.arange(*sigma_range):
-            # Apply window function and sigma-clipping
-            phase_window = np.arange(0, 1, window_size)
-            mag_filtered = np.array([])
-            phase_filtered = np.array([])
-            err_filtered = np.array([])
-            outlier_indices = np.array([], dtype=bool)  # To store outlier indices
+        # Create astropy table from EclipsingBinary objects
+        source_table = Table([
+            [binary.object_name for binary in binaries],
+            [binary.RA.replace(':', ' ') for binary in binaries],
+            [binary.DEC.replace(':', ' ') for binary in binaries]
+        ], names=['object_name', 'ra', 'dec'])
 
-            for i in range(len(phase_window) - 1):
-                # Define the window boundaries
-                lower_bound = phase_window[i]
-                upper_bound = phase_window[i + 1]
+        # Convert 'ra' and 'dec' columns to SkyCoord objects
+        coords = SkyCoord(source_table['ra'], source_table['dec'], unit=(u.hourangle, u.deg))
 
-                # Select data within the window
-                mask = (phase >= lower_bound) & (phase < upper_bound)
-                window_data = mag[mask]
-                window_err = err[mask]
+        # Replace 'ra' and 'dec' columns with numeric values
+        source_table['ra'] = coords.ra.deg
+        source_table['dec'] = coords.dec.deg
 
-                # Apply sigma-clipping within the window
-                median = np.median(window_data)
-                std = np.median(window_data)
-                filtered_mask = np.abs(window_data - median) <= sigma * std
-                filtered_window_data = window_data[filtered_mask]
+        # Upload table to Gaia archive
+        try:
+            Gaia.upload_table(upload_resource=source_table, 
+                              table_name=table_name,
+                              format="votable")
+        except Exception as e:
+            print(f"Error uploading table: {e}")
+            return None
 
-                # Store filtered data and corresponding phases/errors
-                mag_filtered = np.append(mag_filtered, filtered_window_data)
-                phase_filtered = np.append(phase_filtered, phase[mask][filtered_mask])
-                err_filtered = np.append(err_filtered, window_err[filtered_mask])
-                outlier_indices = np.append(outlier_indices, ~filtered_mask)  # Store outlier indices
+        # Update column flags (including 'PK' for 'object_name')
+        try:
+            Gaia.update_user_table(table_name=full_table_name,
+                                  list_of_changes=[["ra","flags","Ra"], 
+                                                   ["dec","flags","Dec"],
+                                                   ["object_name","flags","Pk"]])
+        except Exception as e:
+            print(f"Error updating table flags: {e}")
+            return None
+        
+        # Perform crossmatch
+        try:
+            job = Gaia.cross_match(
+                full_qualified_table_name_a=full_table_name,
+                full_qualified_table_name_b=gaia_table,
+                results_table_name=xmatch_table_name,
+                radius=radius,
+                background=True,
+                verbose=True
+            )
+        except Exception as e:
+            print(f"Error performing crossmatch: {e}")
+            return None
 
-            # Ensure the last part of the light curve is included
-            last_window_mask = phase >= phase_window[-1]
-            mag_filtered = np.append(mag_filtered, mag[last_window_mask])
-            phase_filtered = np.append(phase_filtered, phase[last_window_mask])
-            err_filtered = np.append(err_filtered, err[last_window_mask])
-            outlier_indices = np.append(outlier_indices, np.zeros(sum(last_window_mask), dtype=bool))
+        # Retrieve crossmatch results with custom query
+        try:
+            query = (f"SELECT c.separation*3600 AS separation_arcsec, a.*, b.* "
+                     f"FROM gaiadr3.gaia_source_lite AS a, {full_table_name} AS b, "
+                     f"user_{username}.{xmatch_table_name} AS c "
+                     f"WHERE c.gaia_source_source_id = a.source_id AND "
+                     f"c.{table_name}_{table_name}_oid = b.{table_name}_oid")
+            job = Gaia.launch_job(query=query)
+            results = job.get_results()
 
-            # Plot the results
-            if save_plot:
-                plt.figure()
+            # Write results to file
+            if save_to_file:
+                paths=get_paths()
+                output_filename = f"{paths['demo_data_dir']}xmatch_{table_name}_{gaia_table.replace('.', '_')}.ecsv"
+                results.write(output_filename, overwrite=True) 
 
-                # Plot all data points in blue
-                sns.scatterplot(x=phase, y=mag, color='blue', label='Data')
+            return results
+        except Exception as e:
+            print(f"Error retrieving or saving results: {e}")
+            return None
 
-                # Overlay outliers in red
-                sns.scatterplot(x=phase[outlier_indices], y=mag[outlier_indices], color='red', label='Outliers')
+    except Exception as e:
+        print(f"Error: {e}")
+        return None
 
-                for i in range(len(phase_window) - 1):
-                    lower_bound = phase_window[i]
-                    upper_bound = phase_window[i + 1]
-                    mask = (phase >= lower_bound) & (phase < upper_bound)
-
-                    # Calculate and plot median and std lines
-                    median = np.median(mag[mask])
-                    std = np.median(err[mask])
-                    plt.hlines(y=median, xmin=lower_bound, xmax=upper_bound, color='green', linewidth=1)
-                    plt.hlines(y=median + sigma * std, xmin=lower_bound, xmax=upper_bound, color='orange', linestyle='--', linewidth=0.5)
-                    plt.hlines(y=median - sigma * std, xmin=lower_bound, xmax=upper_bound, color='orange', linestyle='--', linewidth=0.5)
-
-
-                for boundary in phase_window:
-                    plt.axvline(x=boundary, color='gray', linestyle='--', linewidth=0.5)
-
-                plt.title(f"{eb_object.object_name} - {band} band - Sigma Clipping (window={window_size:.2f}, sigma={sigma})")
-                plt.xlabel("Phase")
-                plt.ylabel("Magnitude")
-                plt.gca().invert_yaxis()
-                plt.legend()
-                paths = get_paths()
-                filename = os.path.join(paths['demo_data_dir'], f"{eb_object.object_name}_{band}_sigma_clip_{window_size:.2f}_{sigma}.png")
-                plt.savefig(filename)
-                plt.close()
+    finally:
+        # Always logout, even if there's an error
+        Gaia.logout()
