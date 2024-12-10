@@ -6,9 +6,10 @@ This repository contains code and data for analyzing eclipsing binary stars from
 
   * Read and process eclipsing binary data from fixed-width format files.
   * Cross-match OGLE stars with identification data to extract object type, RA, and DEC.
-  * Read and process extinction data for Magellanic clouds.
+  * Read and process extinction data.
   * Phase-fold light curves using orbital period data.
   * Visualize the phase-folded light curves.
+  * Fit light curves with Fourier series models.
   * Perform cross-matching with Gaia DR3 data.
 
 ## Data
@@ -26,6 +27,7 @@ This repository contains code and data for analyzing eclipsing binary stars from
           * `plot_light_curves()`: Plots the light curves.
           * `check_status()`: Prints information about the object's attributes.
           * `fit_light_curve()`: Fits a Fourier series model to the light curve.
+          * `smooth_light_curve()`: Smooths the light curve using the Savitzky-Golay method.
   * `src/eclipsing_binary/utils.py`:
       * `read_data()`: Reads and combines data from multiple files.
       * `gaia_cross_match()`: Cross-matches with Gaia DR3 data.
@@ -63,4 +65,4 @@ Contributions are welcome\! Please open an issue or submit a pull request.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](https://www.google.com/url?sa=E&source=gmail&q=https://www.google.com/url?sa=E%26source=gmail%26q=LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](https://www.google.com/url?sa=E&source=gmail&q=https://www.google.com/url?sa=E%26source=gmail%26q=https://www.google.com/url?sa=E%26source=gmail%26q=LICENSE) file for details.

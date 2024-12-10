@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import pandas as pd
 import astropy.units as u
 from astroquery.gaia import Gaia
@@ -60,6 +61,12 @@ def read_data(paths):
         for col in ['OGLE-IV', 'OGLE-III', 'OGLE-II', 'other_names', 
                     'RA_deg', 'Dec_deg', 'RA_h', 'Dec_h', '(V-I)_RC', '(V-I)_0', 'E(V-I)_peak', 'box', 'sep']:
             row_dict.pop(col, None)
+
+        # Convert V_magnitude to float, handling '-'
+        if row_dict['V_magnitude'] == '-':
+            row_dict['V_magnitude'] = np.nan
+        else:
+            row_dict['V_magnitude'] = float(row_dict['V_magnitude'])
 
         # Rename columns to match EclipsingBinary attributes
         row_dict['obj_type'] = row_dict.pop('type', None)
@@ -125,7 +132,7 @@ def gaia_cross_match(binaries,
     Returns:
         astropy.table.Table: Crossmatch results.
     """
-    
+
     username = os.environ.get('GAIA_USERNAME')
     password = os.environ.get('GAIA_PASSWORD')
     full_table_name = f"user_{username}.{table_name}"
