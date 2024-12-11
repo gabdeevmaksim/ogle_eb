@@ -2,8 +2,10 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from scipy.optimize import curve_fit
 from scipy.signal import savgol_filter
 from src.eclipsing_binary.config import get_paths
+
 
 class EclipsingBinary:
     def __init__(self, **kwargs):  # Accept keyword arguments
@@ -50,60 +52,6 @@ class EclipsingBinary:
             else:
                 print(f"{attr}: {value}")
         
-    def light_curves_0(self):
-        """
-        Reads and phase-folds the light curves in filters I and V.
-
-        Args:
-          lc_I_dir (str): Path to the directory containing light curves in filter I.
-          lc_V_dir (str): Path to the directory containing light curves in filter V.
-        """
-
-        self.lc_I = None
-        self.lc_V = None
-
-        # Get paths from the configuration
-        paths = get_paths()  # Assuming get_paths is accessible here
-        lc_I_dir = paths['lc_I_dir']
-        lc_V_dir = paths['lc_V_dir']
-
-        try:
-            # Read I-band light curve
-            lc_I_file = os.path.join(lc_I_dir, f"{self.object_name}.dat")
-            jd_I, mag_I, err_I = np.loadtxt(lc_I_file, unpack=True)
-
-            # Phase-fold the I-band light curve
-            phase_I = ((jd_I - self.epoch_of_minimum) / self.period_days) % 1
-
-            # Ensure phase values are in [0, 1) even if JD < epoch_of_minimum
-            phase_I = np.where(phase_I < 0, phase_I + 1, phase_I)
-
-            self.lc_I = {
-                'phase': phase_I,
-                'mag': mag_I,
-                'err': err_I
-            }
-
-            # Read V-band light curve only if V_magnitude is present
-            if not np.isnan(self.V_magnitude):
-                lc_V_file = os.path.join(lc_V_dir, f"{self.object_name}.dat")
-                jd_V, mag_V, err_V = np.loadtxt(lc_V_file, unpack=True)
-
-                # Phase-fold the V-band light curve
-                phase_V = ((jd_V - self.epoch_of_minimum) / self.period_days) % 1
-
-                # Ensure phase values are in [0, 1)
-                phase_V = np.where(phase_V < 0, phase_V + 1, phase_V)
-
-                self.lc_V = {
-                    'phase': phase_V,
-                    'mag': mag_V,
-                    'err': err_V
-                }
-
-        except FileNotFoundError:
-            print(f"Warning: Light curve file not found for {self.object_name}")
-
     def plot_light_curves(self, save_plot=False, band='both', mark_outliers=True, plot_smooth=False):
         """
         Plots the phase-folded light curves.
@@ -220,7 +168,13 @@ class EclipsingBinary:
             # Phase-fold the I-band light curve
             phase_I = ((self.lc_I['JD'] - self.epoch_of_minimum) / self.period_days) % 1
             phase_I = np.where(phase_I < 0, phase_I + 1, phase_I)
-            self.lc_I['phase'] = phase_I
+            
+            # Sort I-band data by phase
+            sort_indices = np.argsort(phase_I)
+            self.lc_I['phase'] = phase_I[sort_indices]
+            self.lc_I['mag'] = self.lc_I['mag'][sort_indices]
+            self.lc_I['err'] = self.lc_I['err'][sort_indices]
+            self.lc_I['JD'] = self.lc_I['JD'][sort_indices]
 
             # Read V-band light curve only if V_magnitude is present
             if not np.isnan(self.V_magnitude):
@@ -238,7 +192,13 @@ class EclipsingBinary:
                 # Phase-fold the V-band light curve
                 phase_V = ((self.lc_V['JD'] - self.epoch_of_minimum) / self.period_days) % 1
                 phase_V = np.where(phase_V < 0, phase_V + 1, phase_V)
-                self.lc_V['phase'] = phase_V
+
+                # Sort I-band data by phase
+                sort_indices = np.argsort(phase_V)
+                self.lc_V['phase'] = phase_V[sort_indices]
+                self.lc_V['mag'] = self.lc_V['mag'][sort_indices]
+                self.lc_V['err'] = self.lc_V['err'][sort_indices]
+                self.lc_V['JD'] = self.lc_V['JD'][sort_indices]
 
         except FileNotFoundError:
             print(f"Warning: Light curve file not found for {self.object_name}")
@@ -355,19 +315,131 @@ class EclipsingBinary:
     def check_parameters(self, **kwargs):
         """
         Checks if the EclipsingBinary object's parameters meet the specified criteria.
+        Handles both numeric and string parameters.
 
         Args:
             kwargs: Keyword arguments specifying the parameter criteria. 
-                    The keys should be the parameter names (e.g., 'period_days', 'I_magnitude'), 
-                    and the values should be tuples specifying the lower and upper bounds 
-                    (inclusive) for the parameter.
+                    For numeric parameters, the values should be tuples specifying 
+                    the lower and upper bounds (inclusive).
+                    For string parameters, the values should be the exact string 
+                    or a list of possible strings.
 
         Returns:
             bool: True if all criteria are met, False otherwise.
         """
 
-        for param, (lower_bound, upper_bound) in kwargs.items():
+        for param, value_or_range in kwargs.items():
             value = getattr(self, param, None)
-            if value is None or not (lower_bound <= value <= upper_bound):
-                return False
+            if isinstance(value_or_range, tuple):  # Numeric parameter
+                lower_bound, upper_bound = value_or_range
+                if value is None or not (lower_bound <= value <= upper_bound):
+                    return False
+            else:  # String parameter
+                if isinstance(value_or_range, str):
+                    valid_values = [value_or_range]  # Convert single string to a list
+                else:
+                    valid_values = value_or_range  # Assume it's a list of valid strings
+                if value not in valid_values:
+                    return False
         return True
+
+    def fit_fourier(self, band='I', n_harmonics=10, non_contact=False):
+        """
+        Fits a Fourier series model to the specified light curve.
+        Handles outlier removal using O-C residuals.
+
+        Args:
+            band (str, optional): The band to fit ('I' or 'V'). Defaults to 'I'.
+            n_harmonics (int, optional): The number of harmonics to include in the 
+                                         Fourier series. Defaults to 10.
+            non_contact (bool, optional): Whether to force fitting even if the object 
+                                          is not a contact binary. Defaults to False.
+        """
+
+        if self.obj_type != 'C' and not non_contact:
+            print(f"Warning: Object {self.object_name} is not a contact binary (obj_type = {self.obj_type}). "
+                  f"Skipping Fourier fitting. Use non_contact=True to force fitting.")
+            return
+
+        if band == 'I' and self.lc_I is not None:
+            lc_data = self.lc_I
+        elif band == 'V' and self.lc_V is not None:
+            lc_data = self.lc_V
+        else:
+            print(f"Warning: No light curve data found for band {band} in {self.object_name}")
+            return
+        
+        # Define the model function (Fourier series)
+        def fourier_model(phase, *params):
+            result = params[0]  # Constant term
+            for i in range(1, len(params) // 3):
+                result += params[3*i - 2] * np.sin(2 * np.pi * i * phase + params[3*i - 1])
+            return result
+
+        # Initial guess for parameters
+        initial_guess = [np.mean(lc_data['mag'])]  # Use the mean magnitude as the initial guess for the constant term
+        for _ in range(n_harmonics):
+            initial_guess.extend([0.1, 0, 0])  # Add initial guesses for amplitude, frequency, and phase for each harmonic
+
+        # 1. Initial fit with outliers
+        phase = lc_data['phase']
+        mag = lc_data['mag']
+        
+        # Apply curve_fit to estimate the model parameters
+        popt, _ = curve_fit(fourier_model, phase, mag, p0=initial_guess)
+
+        # 2. Calculate O-C residuals
+        oc_residuals = mag - fourier_model(phase, *popt)
+
+        # 3. Remove outliers based on O-C residuals (using IQR method with adjusted factors)
+        Q1 = np.percentile(oc_residuals, 25)
+        Q3 = np.percentile(oc_residuals, 75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 10 * IQR  # Increased faint_factor to 10
+        upper_bound = Q3 + 2 * IQR   # Decreased bright_factor to 2
+        outlier_mask = (oc_residuals < lower_bound) | (oc_residuals > upper_bound)
+
+        # 4. Fit again without outliers
+        phase_filtered = phase[~outlier_mask]
+        mag_filtered = mag[~outlier_mask]
+        
+        # Apply curve_fit again, this time excluding the outliers
+        popt_filtered, _ = curve_fit(fourier_model, phase_filtered, mag_filtered, p0=initial_guess)
+
+        # Sort fitted values by phase
+        lc_data[f'phase_fit_{n_harmonics}'] = phase
+        lc_data[f'mag_fit_{n_harmonics}'] = fourier_model(phase, *popt_filtered)
+
+    def plot_fourier_fit(eb_object, band='I', n_harmonics=10):
+        """
+        Plots the phase-folded light curve and the fitted Fourier series model.
+
+        Args:
+            eb_object (EclipsingBinary): The EclipsingBinary object.
+            band (str, optional): The band to plot ('I' or 'V'). Defaults to 'I'.
+            n_harmonics (int, optional): The number of harmonics in the fitted model. Defaults to 10.
+        """
+
+        if band == 'I' and eb_object.lc_I is not None:
+            lc_data = eb_object.lc_I
+        elif band == 'V' and eb_object.lc_V is not None:
+            lc_data = eb_object.lc_V
+        else:
+            print(f"Warning: No light curve data found for band {band} in {eb_object.object_name}")
+            return
+
+        if f'mag_fit_{n_harmonics}' not in lc_data:
+            print(f"Warning: Fourier fit not found for band {band} in {eb_object.object_name}. "
+                f"Please use the 'fit_fourier' method first.")
+            return
+
+        plt.figure(figsize=(10, 6))
+        plt.scatter(lc_data['phase'], lc_data['mag'], s=1, label='Original Data')
+        plt.plot(lc_data['phase'], lc_data[f'mag_fit_{n_harmonics}'], color='red', label=f'Fourier Fit ({n_harmonics} harmonics)')
+        plt.xlabel('Phase')
+        plt.ylabel('Magnitude')
+        plt.title(f'{eb_object.object_name} - {band} band - Fourier Fit')
+        plt.legend()
+        plt.gca().invert_yaxis()
+        plt.show()
+    
