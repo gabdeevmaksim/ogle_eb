@@ -224,3 +224,5 @@ def gaia_cross_match(binaries,
     finally:
         # Always logout, even if there's an error
         Gaia.logout()
+
+
