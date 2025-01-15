@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.optimize import curve_fit
 from scipy.signal import savgol_filter
-from src.eclipsing_binary.config import get_paths
+from eclipsing_binary.config import get_paths
 
 class EclipsingBinary:
     def __init__(self, **kwargs):  # Accept keyword arguments
@@ -342,16 +342,17 @@ class EclipsingBinary:
                     return False
         return True
 
-    def fit_fourier(self, band='I', non_contact=False):
+    def fit_fourier(self, band='I', n_harmonics=10, non_contact=False):
         """
-        Fits a Fourier series model to the specified light curve.
-        Determines the most reliable number of harmonics using Baart's condition.
-        Handles outlier removal using O-C residuals.
+        Fits a Fourier series model to the specified light curve using 10 harmonics.
+        Handles outlier removal using O-C residuals and incorporates errors in sigma calculation.
 
         Args:
             band (str, optional): The band to fit ('I' or 'V'). Defaults to 'I'.
-            non_contact (bool, optional): Whether to force fitting even if the object 
-                                          is not a contact binary. Defaults to False.
+            n_harmonics (int, optional): The number of harmonics to include in the Fourier series. 
+                                         Defaults to 10.
+            non_contact (bool, optional): Whether to force fitting even if the object is not a 
+                                          contact binary. Defaults to False.
         """
 
         if self.obj_type != 'C' and not non_contact:
@@ -366,7 +367,7 @@ class EclipsingBinary:
         else:
             print(f"Warning: No light curve data found for band {band} in {self.object_name}")
             return
-        
+
         # Define the model function (Fourier series)
         def fourier_model(phase, *params):
             result = params[0]  # Constant term
@@ -374,70 +375,53 @@ class EclipsingBinary:
                 result += params[3*i - 2] * np.sin(2 * np.pi * i * phase + params[3*i - 1])
             return result
 
-        # Function to calculate the unit-lag auto-correlation of residuals
-        def calculate_autocorrelation(residuals):
-            """Calculates the unit-lag auto-correlation of a sequence."""
-            n = len(residuals)
-            mean = np.mean(residuals)
-            numerator = np.sum((residuals[:-1] - mean) * (residuals[1:] - mean))
-            denominator = np.sum((residuals - mean)**2)
-            return numerator / denominator
-
-       # 1. Initial fit with a maximum number of harmonics
+        # 1. Initial fit with outliers
         phase = lc_data['phase']
         mag = lc_data['mag']
-        max_harmonics = 10  # You can adjust this if needed
+        err = lc_data['err']  # Get the errors
         initial_guess = [np.mean(mag)]
-        for _ in range(max_harmonics):
+        for _ in range(n_harmonics):
             initial_guess.extend([0.1, 0, 0])
-        popt, _ = curve_fit(fourier_model, phase, mag, p0=initial_guess)
+        popt, _ = curve_fit(fourier_model, phase, mag, sigma=err, absolute_sigma=False, p0=initial_guess)  # Use errors in sigma
 
-        # 2. Determine the optimal number of harmonics using Baart's condition (modified)
-        autocorrelations = []
-        tolerance = (2 * (len(mag) - 1))**(-1/2)  # Calculate tolerance only once
+        # 2. Calculate O-C residuals
+        oc_residuals = mag - fourier_model(phase, *popt)
 
-        for n_harmonics in range(1, max_harmonics + 1):
-            # Calculate residuals
-            residuals = mag - fourier_model(phase, *popt[:3*n_harmonics])
-
-            # Calculate auto-correlation
-            autocorr = calculate_autocorrelation(residuals)
-            autocorrelations.append(autocorr)
-
-        # Find the number of harmonics with autocorrelation closest to tolerance
-        optimal_harmonics = np.argmin(np.abs(np.array(autocorrelations) - tolerance)) + 1
-
-        # 3. Remove outliers based on O-C residuals with optimal harmonics
-        oc_residuals = mag - fourier_model(phase, *popt[:3*optimal_harmonics])
+        # 3. Remove outliers based on O-C residuals (using IQR method)
         Q1 = np.percentile(oc_residuals, 25)
         Q3 = np.percentile(oc_residuals, 75)
         IQR = Q3 - Q1
-        lower_bound = Q1 - 1.5 * IQR  # Use 1.5 IQR for both sides
+        lower_bound = Q1 - 1.5 * IQR
         upper_bound = Q3 + 1.5 * IQR
         outlier_mask = (oc_residuals < lower_bound) | (oc_residuals > upper_bound)
 
-        # 4. Fit again without outliers using optimal harmonics
+        # 4. Fit again without outliers
         phase_filtered = phase[~outlier_mask]
         mag_filtered = mag[~outlier_mask]
-        popt_filtered, _ = curve_fit(fourier_model, phase_filtered, mag_filtered, p0=initial_guess[:3*optimal_harmonics])
+        err_filtered = err[~outlier_mask]  # Filter errors as well
+        popt_filtered, _ = curve_fit(fourier_model, phase_filtered, mag_filtered, sigma=err_filtered, absolute_sigma=False, p0=initial_guess)  # Use filtered errors
+
+        lc_data['outlier_mask'] = outlier_mask
 
         # Generate model for 100 equally spaced phases
-        phase_fit = np.linspace(0, 0.99, 100)  # 100 phases from 0 to 0.99
+        phase_fit = np.linspace(0, 0.99, 100)
         mag_fit = fourier_model(phase_fit, *popt_filtered)
 
         # Store the fit results
-        lc_data[f'phase_fit_{optimal_harmonics}'] = phase_fit
-        lc_data[f'mag_fit_{optimal_harmonics}'] = mag_fit
-        lc_data['n_harmonics'] = optimal_harmonics
+        lc_data[f'phase_fit_{n_harmonics}'] = phase_fit
+        lc_data[f'mag_fit_{n_harmonics}'] = mag_fit
+        lc_data['n_harmonics'] = n_harmonics
 
-    def plot_fourier_fit(eb_object, band='I', n_harmonics=10):
+    def plot_fourier_fit(eb_object, band='I', n_harmonics=10, filename=None):
         """
         Plots the phase-folded light curve and the fitted Fourier series model.
+        Saves the plot to a file if filename is provided.
 
         Args:
             eb_object (EclipsingBinary): The EclipsingBinary object.
             band (str, optional): The band to plot ('I' or 'V'). Defaults to 'I'.
             n_harmonics (int, optional): The number of harmonics in the fitted model. Defaults to 10.
+            filename (str, optional): The filename to save the plot to. If None, the plot is not saved.
         """
 
         if band == 'I' and eb_object.lc_I is not None:
@@ -455,11 +439,16 @@ class EclipsingBinary:
 
         plt.figure(figsize=(10, 6))
         plt.scatter(lc_data['phase'], lc_data['mag'], s=1, label='Original Data')
-        plt.plot(lc_data[f"phase_fit_{n_harmonics}"], lc_data[f'mag_fit_{n_harmonics}'], color='red', label=f'Fourier Fit ({n_harmonics} harmonics)')
+        plt.scatter(lc_data[f"phase_fit_{n_harmonics}"], lc_data[f'mag_fit_{n_harmonics}'], color='red', label=f'Fourier Fit ({n_harmonics} harmonics)')
         plt.xlabel('Phase')
         plt.ylabel('Magnitude')
         plt.title(f'{eb_object.object_name} - {band} band - Fourier Fit')
         plt.legend()
         plt.gca().invert_yaxis()
-        plt.show()
+       
+        if filename:
+            plt.savefig(filename)
+            plt.close()
+        else:
+            plt.show()
     

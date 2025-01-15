@@ -5,8 +5,8 @@ import astropy.units as u
 from astroquery.gaia import Gaia
 from astropy.table import Table
 from astropy.coordinates import SkyCoord
-from src.eclipsing_binary.config import get_paths
-from src.eclipsing_binary.core import EclipsingBinary
+from eclipsing_binary.config import get_paths
+from eclipsing_binary.core import EclipsingBinary
 
 def read_data(paths):
     """

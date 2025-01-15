@@ -5,7 +5,7 @@ def get_paths():
     """Reads data paths from the configuration file."""
 
     config = configparser.ConfigParser()
-    config.read('../config.ini')
+    config.read('config.ini')
 
     paths = config['paths']
     base_dir = paths['w_dir']  # Get the base directory
