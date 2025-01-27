@@ -151,6 +151,7 @@ class EclipsingBinary:
         paths = get_paths()
         lc_I_dir = paths['lc_I_dir']
         lc_V_dir = paths['lc_V_dir']
+
         try:
             # Read I-band light curve
             lc_I_file = os.path.join(lc_I_dir, f"{self.object_name}.dat")
@@ -163,6 +164,13 @@ class EclipsingBinary:
                 'err': err_I
             }
             self.lc_I['outlier_mask'] = self.remove_outliers(band='I')  # Store outlier mask
+
+            # Ensure 'JD' is a float64 array
+            self.lc_I['JD'] = self.lc_I['JD'].astype(np.float64)
+
+            # Ensure 'epoch_of_minimum' and 'period_days' are float64
+            self.epoch_of_minimum = np.float64(self.epoch_of_minimum)
+            self.period_days = np.float64(self.period_days)
 
             # Phase-fold the I-band light curve
             phase_I = ((self.lc_I['JD'] - self.epoch_of_minimum) / self.period_days) % 1
@@ -186,7 +194,12 @@ class EclipsingBinary:
                     'mag': mag_V,
                     'err': err_V
                 }
-                self.lc_V['outlier_mask'] = self.remove_outliers(band='V')  # Store outlier mask
+                
+                if len(self.lc_V['mag']) < 10:
+                    print(f"Warning: Not enough data points in V-band light curve for {self.object_name}. Skipping outlier removal.")
+                    self.lc_V['outlier_mask'] = np.zeros(len(self.lc_V['mag']), dtype=bool)  # No outliers
+                else:
+                    self.lc_V['outlier_mask'] = self.remove_outliers(band='V')  # Store outlier mask
 
                 # Phase-fold the V-band light curve
                 phase_V = ((self.lc_V['JD'] - self.epoch_of_minimum) / self.period_days) % 1

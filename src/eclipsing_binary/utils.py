@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
+import random
 import astropy.units as u
 from astroquery.gaia import Gaia
 from astropy.table import Table
@@ -23,7 +24,7 @@ def read_data(paths):
     """
 
     # Read eclipsing binary data (_ecl) using fixed-width formatted reader
-    ecl_col_specs = [(0, 19), (20, 26), (27, 34), (35, 46), (46, 58), (58, 64), (64, 70)]
+    ecl_col_specs = [(0, 19), (20, 27), (28, 35), (36, 48), (49, 58), (59, 65), (65, 70)]
     ecl_names = ['object_name', 'I_magnitude', 'V_magnitude', 'period_days', 
                  'epoch_of_minimum', 'main_eclipse_dip', 'second_eclipse_dip']
     ecl_df = pd.read_fwf(paths['ecl_file'], colspecs=ecl_col_specs, names=ecl_names, header=None)
@@ -34,7 +35,7 @@ def read_data(paths):
     ident_df = pd.read_fwf(paths['ident_file'], colspecs=ident_col_specs, names=ident_names, header=None)
 
     # Read extinction data (_ext) if provided
-    if 'ext_file' in paths:
+    if 'ext_file' in paths and os.path.isfile(paths['ext_file']):
         ext_col_specs = [(2, 14), (15, 30), (31, 41), (42, 55), (56, 63), (65, 72), (73, 82), (83, 92), (93,102), (103,112), (113,121), (122,130), (131,138), (138,149), (150,161)]
         ext_names = ['RA_deg', 'Dec_deg',  'RA_h', 'Dec_h', 'E(V-I)', '-sigma1', '+sigma2', '(V-I)_RC', '(V-I)_0', 'E(V-I)peak', 'E(V-I)sfd', 'box', 'sep', 'RA_coord', 'DEC_coord']
         ext_df = pd.read_fwf(paths['ext_file'], colspecs=ext_col_specs, names=ext_names, header=3)
@@ -43,7 +44,7 @@ def read_data(paths):
         ext_df = None
 
      # Merge dataframes
-    merged_df = pd.merge(ecl_df, ident_df, on='object_name', how='left')
+    merged_df = pd.merge(ident_df, ecl_df, on='object_name', how='left')
     if ext_df is not None:
         merged_df = pd.merge(merged_df, ext_df, on=['RA_coord', 'DEC_coord'], how='left')
 
@@ -225,4 +226,63 @@ def gaia_cross_match(binaries,
         # Always logout, even if there's an error
         Gaia.logout()
 
+
+def select_random_objects(output_file, num_samples=10000):
+    """
+    Selects 10,000 random 'C' (contact) and 10,000 random 'NC' (non-contact) objects
+    from the identification file and writes them to a new file.
+
+    Args:
+        output_file (str): The path to the output file where the selected objects will be written.
+        num_samples (int): The number of random samples to select for each type ('C' and 'NC'). Default is 10,000.
+
+    Returns:
+        None
+    """
+
+    # Load the necessary paths
+    paths = get_paths()
+    ident_file = paths['ident_file']
+
+    # Read identification data (_ident)
+    ident_col_specs = [(0, 19), (20, 24), (25, 36), (37, 49), (50, 66), (67, 82), (83, 99), (100, 116)]
+    ident_names = ['object_name', 'type', 'RA_coord', 'DEC_coord', 'OGLE-IV', 'OGLE-III', 'OGLE-II', 'other_names']
+    ident_df = pd.read_fwf(ident_file, colspecs=ident_col_specs, names=ident_names, header=None)
+
+    # Filter by type 'C' and 'NC'
+    contact_binaries = ident_df[ident_df['type'] == 'C']
+    non_contact_binaries = ident_df[ident_df['type'] == 'NC']
+
+    # Select random samples
+    # Take out 1000 more objects
+    contact_samples = contact_binaries.sample(n=num_samples + num_samples//10, replace=True)
+    non_contact_samples = non_contact_binaries.sample(n=num_samples + num_samples//10, replace=True)
+
+    lc_I_dir = paths['lc_I_dir']
+
+    # Check the existence of LCs files and filter the samples
+    contact_samples['lc_exists'] = contact_samples['object_name'].apply(lambda x: os.path.isfile(os.path.join(lc_I_dir, f"{x}.dat")))
+    non_contact_samples['lc_exists'] = non_contact_samples['object_name'].apply(lambda x: os.path.isfile(os.path.join(lc_I_dir, f"{x}.dat")))
+
+    # Count how many LCs were not found
+    contact_not_found = contact_samples[~contact_samples['lc_exists']].shape[0]
+    non_contact_not_found = non_contact_samples[~non_contact_samples['lc_exists']].shape[0]
+    print(f"Contact LCs not found: {contact_not_found}")
+    print(f"Non-contact LCs not found: {non_contact_not_found}")
+
+    # Filter the samples to only include those with existing LCs
+    existing_contact_samples = contact_samples[contact_samples['lc_exists']]
+    existing_non_contact_samples = non_contact_samples[non_contact_samples['lc_exists']]
+
+    # Select the first num_samples objects
+    final_contact_samples = existing_contact_samples.head(num_samples)
+    final_non_contact_samples = existing_non_contact_samples.head(num_samples)
+
+    # Combine samples
+    selected_samples = pd.concat([final_contact_samples, final_non_contact_samples])
+
+    # Write the selected objects to a new file in fixed-width format
+    with open(output_file, 'w') as f:
+        for index, row in selected_samples.iterrows():
+            f.write(f"{row['object_name']:19} {row['type']:4} {row['RA_coord']:12} {row['DEC_coord']:12} {row['OGLE-IV']:17} {row['OGLE-III']:15} {row['OGLE-II']:16} {row['other_names']:16}\n")
 
