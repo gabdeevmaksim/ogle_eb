@@ -5,7 +5,11 @@ def get_paths():
     """Reads data paths from the configuration file."""
 
     config = configparser.ConfigParser()
-    config.read('config.ini')
+    config_file = '/Users/wera/Max_astro/Slovakia/ogle_eb/config.ini'
+    if not os.path.exists(config_file):
+        print(f"Configuration file '{config_file}' does not exist.")
+        return {}
+    config.read(config_file)
 
     paths = config['paths']
     base_dir = paths['w_dir']  # Get the base directory
